@@ -39,6 +39,7 @@ def get_race_telemetry(session):
             with open(f"computed_data/{event_name}_race_telemetry.json", "r") as f:
                 frames = json.load(f)
                 print("Loaded precomputed race telemetry data.")
+                print("The replay should begin in a new window shortly!")
                 return frames
     except FileNotFoundError:
         pass  # Need to compute from scratch
@@ -223,7 +224,8 @@ def get_race_telemetry(session):
             "lap": leader_lap,   # leader’s lap at this time
             "drivers": frame_data,
         })
-
+    print("completed telemetry extraction...")
+    print("Saving to JSON file...")
     # If computed_data/ directory doesn't exist, create it
     if not os.path.exists("computed_data"):
         os.makedirs("computed_data")
@@ -232,4 +234,6 @@ def get_race_telemetry(session):
     with open(f"computed_data/{event_name}_race_telemetry.json", "w") as f:
         json.dump(frames, f, indent=2)
 
+    print("Saved Successfully!")
+    print("The replay should begin in a new window shortly")
     return frames

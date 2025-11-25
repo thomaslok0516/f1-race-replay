@@ -2,14 +2,12 @@ import os
 import arcade
 import numpy as np
 
-from src.f1_data import DT
-
-
+# Kept these as "default" starting sizes, but they are no longer hard limits
 SCREEN_WIDTH = 1920
-SCREEN_HEIGHT = 1080
+SCREEN_HEIGHT = 1200
+SCREEN_TITLE = "F1 Replay"
 
-
-def build_track_from_example_lap(example_lap, track_width=500):
+def build_track_from_example_lap(example_lap, track_width=200):
     plot_x_ref = example_lap["X"].to_numpy()
     plot_y_ref = example_lap["Y"].to_numpy()
 
@@ -43,7 +41,8 @@ def build_track_from_example_lap(example_lap, track_width=500):
 class F1ReplayWindow(arcade.Window):
     def __init__(self, frames, example_lap, drivers, title,
                  playback_speed=1.0, driver_colors=None):
-        super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, title, resizable=False)
+        # Set resizable to True so the user can adjust mid-sim
+        super().__init__(SCREEN_WIDTH, SCREEN_HEIGHT, title, resizable=True)
 
         self.frames = frames
         self.n_frames = len(frames)
@@ -53,56 +52,78 @@ class F1ReplayWindow(arcade.Window):
         self.frame_index = 0
         self.paused = False
 
-        # Build track geometry
+        # Build track geometry (Raw World Coordinates)
         (self.plot_x_ref, self.plot_y_ref,
          self.x_inner, self.y_inner,
          self.x_outer, self.y_outer,
          self.x_min, self.x_max,
          self.y_min, self.y_max) = build_track_from_example_lap(example_lap)
 
-        padding = 0.05
-        world_w = max(1.0, self.x_max - self.x_min)
-        world_h = max(1.0, self.y_max - self.y_min)
-        usable_w = SCREEN_WIDTH * (1 - 2 * padding)
-        usable_h = SCREEN_HEIGHT * (1 - 2 * padding)
+        # Pre-calculate interpolated world points ONCE (optimization)
+        # We store these as 'world' coordinates, not screen coordinates
+        self.world_inner_points = self._interpolate_points(self.x_inner, self.y_inner)
+        self.world_outer_points = self._interpolate_points(self.x_outer, self.y_outer)
 
-        self.world_scale = min(usable_w / world_w, usable_h / world_h)
-        world_cx = (self.x_min + self.x_max) / 2
-        world_cy = (self.y_min + self.y_max) / 2
-        screen_cx = SCREEN_WIDTH / 2
-        screen_cy = SCREEN_HEIGHT / 2
-        self.tx = screen_cx - self.world_scale * world_cx
-        self.ty = screen_cy - self.world_scale * world_cy
+        # These will hold the actual screen coordinates to draw
+        self.screen_inner_points = []
+        self.screen_outer_points = []
+        
+        # Scaling parameters (initialized to 0, calculated in update_scaling)
+        self.world_scale = 1.0
+        self.tx = 0
+        self.ty = 0
 
-        # Precompute track points in screen coords (densified for smoothness)
-        self.track_outer_points = self._build_polyline(self.x_outer, self.y_outer)
-        self.track_inner_points = self._build_polyline(self.x_inner, self.y_inner)
-
-        # Background texture if exists
+        # Load Background
         bg_path = os.path.join("resources", "background.png")
         self.bg_texture = arcade.load_texture(bg_path) if os.path.exists(bg_path) else None
 
-        self.time_label = arcade.Text(
-            "t = 0.0 s",     # text
-            20,              # x
-            20,              # y
-            arcade.color.WHITE, 
-            18,              # font size
-            anchor_x="left",
-            anchor_y="bottom",
-        )
-
         arcade.set_background_color(arcade.color.BLACK)
 
-    def _build_polyline(self, xs, ys, interp_points=2000):
+        # Trigger initial scaling calculation
+        self.update_scaling(self.width, self.height)
+
+    def _interpolate_points(self, xs, ys, interp_points=2000):
+        """Generates smooth points in WORLD coordinates."""
         t_old = np.linspace(0, 1, len(xs))
         t_new = np.linspace(0, 1, interp_points)
-
         xs_i = np.interp(t_new, t_old, xs)
         ys_i = np.interp(t_new, t_old, ys)
+        return list(zip(xs_i, ys_i))
 
-        points = [self.world_to_screen(x, y) for x, y in zip(xs_i, ys_i)]
-        return points
+    def update_scaling(self, screen_w, screen_h):
+        """
+        Recalculates the scale and translation to fit the track 
+        perfectly within the new screen dimensions while maintaining aspect ratio.
+        """
+        padding = 0.05
+        world_w = max(1.0, self.x_max - self.x_min)
+        world_h = max(1.0, self.y_max - self.y_min)
+        
+        usable_w = screen_w * (1 - 2 * padding)
+        usable_h = screen_h * (1 - 2 * padding)
+
+        # Calculate scale to fit whichever dimension is the limiting factor
+        scale_x = usable_w / world_w
+        scale_y = usable_h / world_h
+        self.world_scale = min(scale_x, scale_y)
+
+        # Center the world in the screen
+        world_cx = (self.x_min + self.x_max) / 2
+        world_cy = (self.y_min + self.y_max) / 2
+        screen_cx = screen_w / 2
+        screen_cy = screen_h / 2
+
+        self.tx = screen_cx - self.world_scale * world_cx
+        self.ty = screen_cy - self.world_scale * world_cy
+
+        # Update the polyline screen coordinates based on new scale
+        self.screen_inner_points = [self.world_to_screen(x, y) for x, y in self.world_inner_points]
+        self.screen_outer_points = [self.world_to_screen(x, y) for x, y in self.world_outer_points]
+
+    def on_resize(self, width, height):
+        """Called automatically by Arcade when window is resized."""
+        super().on_resize(width, height)
+        self.update_scaling(width, height)
 
     def world_to_screen(self, x, y):
         sx = self.world_scale * x + self.tx
@@ -112,149 +133,126 @@ class F1ReplayWindow(arcade.Window):
     def on_draw(self):
         self.clear()
 
-        # Background image (full-screen) or solid colour
-        if self.bg_texture is not None:
+        # 1. Draw Background (stretched to fit new window size)
+        if self.bg_texture:
             arcade.draw_lrbt_rectangle_textured(
-              left=0,
-              right=SCREEN_WIDTH,
-              bottom=0,
-              top=SCREEN_HEIGHT,
-              texture=self.bg_texture,
+                left=0, right=self.width,
+                bottom=0, top=self.height,
+                texture=self.bg_texture
             )
 
-        # Draw track
+        # 2. Draw Track (using pre-calculated screen points)
         track_color = (150, 150, 150)
-        arcade.draw_line_strip(self.track_inner_points, track_color, 4)
-        arcade.draw_line_strip(self.track_outer_points, track_color, 4)
+        if len(self.screen_inner_points) > 1:
+            arcade.draw_line_strip(self.screen_inner_points, track_color, 4)
+        if len(self.screen_outer_points) > 1:
+            arcade.draw_line_strip(self.screen_outer_points, track_color, 4)
 
-        # Current frame
+        # 3. Draw Cars
         frame = self.frames[self.frame_index]
+        for code, pos in frame["drivers"].items():
+            if pos.get("rel_dist", 0) == 1:
+                continue 
+            sx, sy = self.world_to_screen(pos["x"], pos["y"])
+            color = self.driver_colors.get(code, arcade.color.WHITE)
+            arcade.draw_circle_filled(sx, sy, 6, color)
 
-        # Lap Number display
-        # Find leader by lap, then dist
+        # --- UI ELEMENTS (Dynamic Positioning) ---
+        
+        # Determine Leader info
         leader_code = max(
             frame["drivers"],
             key=lambda c: (frame["drivers"][c].get("lap", 1), frame["drivers"][c].get("dist", 0))
         )
         leader_lap = frame["drivers"][leader_code].get("lap", 1)
-        lap_text = arcade.Text(
-            f"Lap: {leader_lap}",
-            30, SCREEN_HEIGHT - 40,
-            arcade.color.WHITE, 28,
-            anchor_x="left", anchor_y="top"
-        )
-        lap_text.draw()
 
-        # Total Race Time (below lap counter)
+        # Time Calculation
         t = frame["t"]
         hours = int(t // 3600)
         minutes = int((t % 3600) // 60)
         seconds = int(t % 60)
         time_str = f"{hours:02}:{minutes:02}:{seconds:02}"
-        time_text = arcade.Text(
-            f"Race Time: {time_str}",
-            30, SCREEN_HEIGHT - 80,
-            arcade.color.WHITE, 22,
-            anchor_x="left", anchor_y="top"
-        )
-        time_text.draw()
 
-        # Draw cars as circles (skip if rel_dist == 1)
-        for code, pos in frame["drivers"].items():
-            if pos.get("rel_dist", 0) == 1:
-                continue  # Don't draw car if rel_dist == 1
-            sx, sy = self.world_to_screen(pos["x"], pos["y"])
-            color = self.driver_colors.get(code, arcade.color.WHITE)
-            arcade.draw_circle_filled(sx, sy, 6, color)
+        # Draw HUD - Top Left
+        arcade.draw_text(f"Lap: {leader_lap}", 
+                         20, self.height - 40, 
+                         arcade.color.WHITE, 24, anchor_y="top")
+        
+        arcade.draw_text(f"Race Time: {time_str}", 
+                         20, self.height - 80, 
+                         arcade.color.WHITE, 20, anchor_y="top")
 
-        # Leaderboard
+        # Draw Leaderboard - Top Right
+        leaderboard_x = self.width - 20
+        leaderboard_y = self.height - 40
+        
+        arcade.draw_text("Leaderboard", leaderboard_x, leaderboard_y, 
+                         arcade.color.WHITE, 20, bold=True, anchor_x="right", anchor_y="top")
+
         driver_list = []
         for code, pos in frame["drivers"].items():
             color = self.driver_colors.get(code, arcade.color.WHITE)
             driver_list.append((code, color, pos))
         
-        driver_list.sort(key=lambda x: x[2].get("position", 999))
-
-        leaderboard_x = SCREEN_WIDTH - 350
-        leaderboard_y = SCREEN_HEIGHT - 80
-        row_height = 32
-
-        arcade.Text(
-            "Leaderboard",
-            leaderboard_x + 10, leaderboard_y + 10,
-            arcade.color.WHITE, 22, bold=True
-        ).draw()
-
-        # Sort the drivers by dist for leaderboard display
+        # Sort by distance
         driver_list.sort(key=lambda x: x[2].get("dist", 999), reverse=True)
 
-        for i, (code, _, pos) in enumerate(driver_list):
-            color = self.driver_colors.get(code, arcade.color.WHITE)
+        row_height = 25
+        for i, (code, color, pos) in enumerate(driver_list):
             current_pos = i + 1
             if pos.get("rel_dist", 0) == 1:
                 text = f"{current_pos}. {code}   OUT"
             else:
                 text = f"{current_pos}. {code}"
-            arcade.Text(
+            
+            arcade.draw_text(
                 text,
-                leaderboard_x + 20,
-                leaderboard_y - row_height * (i+1),
+                leaderboard_x,
+                leaderboard_y - 30 - (i * row_height),
                 color,
-                18
-            ).draw()
+                16,
+                anchor_x="right", anchor_y="top"
+            )
 
-        # Controls Legend (bottom left)
-        legend_x = 30
-        legend_y = 180
+        # Controls Legend - Bottom Left
+        legend_x = 20
+        legend_y = 150 # Height of legend block
         legend_lines = [
             "Controls:",
             "[SPACE]  Pause/Resume",
-            "[←/→]    Rewind / Fast Forward",
-            "[↑/↓]    Increase / Decrease Speed",
-            "[1-4]    Set Speed (0.5x, 1x, 2x, 4x)",
+            "[←/→]    Rewind / FastForward",
+            "[↑/↓]    Speed +/- (0.5x, 1x, 2x, 4x)",
         ]
+        
         for i, line in enumerate(legend_lines):
-            arcade.Text(
+            arcade.draw_text(
                 line,
                 legend_x,
-                legend_y - i * 28,
+                legend_y - (i * 25),
                 arcade.color.LIGHT_GRAY if i > 0 else arcade.color.WHITE,
-                20 if i > 0 else 22,
-                anchor_x="left",
-                anchor_y="top",
+                14,
                 bold=(i == 0)
-            ).draw()
+            )
 
     def on_update(self, delta_time: float):
-
         if self.paused:
             return
-
-        # Advance frame based on playback_speed
-        step = max(1, int(self.playback_speed))  # integer step for simplicity
+        step = max(1, int(self.playback_speed))
         self.frame_index += step
-
         if self.frame_index >= self.n_frames:
-            self.frame_index = self.n_frames - 1  # stop at end
+            self.frame_index = self.n_frames - 1
 
     def on_key_press(self, symbol: int, modifiers: int):
-        # Space: pause/unpause
         if symbol == arcade.key.SPACE:
             self.paused = not self.paused
-
-        # Left/right arrow: scrub
         elif symbol == arcade.key.RIGHT:
-            self.frame_index = min(self.frame_index + 5, self.n_frames - 1)
+            self.frame_index = min(self.frame_index + 10, self.n_frames - 1)
         elif symbol == arcade.key.LEFT:
-            self.frame_index = max(self.frame_index - 5, 0)
+            self.frame_index = max(self.frame_index - 10, 0)
         elif symbol == arcade.key.UP:
-            # Increase playback speed
             self.playback_speed *= 2.0
         elif symbol == arcade.key.DOWN:
-            # Decrease playback speed
             self.playback_speed = max(0.1, self.playback_speed / 2.0)
-
-        # Number keys to change playback speed
         elif symbol == arcade.key.KEY_1:
             self.playback_speed = 0.5
         elif symbol == arcade.key.KEY_2:
@@ -264,9 +262,7 @@ class F1ReplayWindow(arcade.Window):
         elif symbol == arcade.key.KEY_4:
             self.playback_speed = 4.0
 
-
-def run_arcade_replay(frames, example_lap, drivers, title,
-                      playback_speed=1.0, driver_colors=None):
+def run_arcade_replay(frames, example_lap, drivers, title, playback_speed=1.0, driver_colors=None):
     window = F1ReplayWindow(
         frames=frames,
         example_lap=example_lap,
